@@ -12,8 +12,19 @@ using Lighter.Native.Generated;
 /// function must be called on every non-null char* we receive, or we leak
 /// native heap memory on every signed transaction. This wrapper centralizes
 /// that so call sites can't forget it.
+///
+/// TYPE NOTE (verified against actual ClangSharp multi-file output, not
+/// assumed): the generator emits `char *` parameters/fields as `sbyte*`,
+/// not `IntPtr` — this file is `unsafe` throughout to work with that
+/// directly rather than fighting it with casts. Struct fields that map to
+/// `int64_t` (e.g. CreateOrderTxReq.ClientOrderIndex) come out as `nint`,
+/// not `long`; method *parameters* of the same native type come out as
+/// `long` instead — an inconsistency in ClangSharp's codegen between
+/// struct-field and parameter contexts, not a mistake here. Conversions
+/// between `long` and `nint` are implicit on 64-bit but the OrderLeg
+/// public API stays on `long` for an ordinary, framework-agnostic surface.
 /// </summary>
-public sealed class LighterSigner
+public sealed unsafe class LighterSigner
 {
     /// <summary>
     /// Generates a new API key pair. Caller is responsible for persisting
@@ -45,21 +56,21 @@ public sealed class LighterSigner
     /// </summary>
     public static string? CreateClient(string url, string privateKeyHex, int chainId, int apiKeyIndex, long accountIndex)
     {
-        var urlPtr = Marshal.StringToHGlobalAnsi(url);
-        var keyPtr = Marshal.StringToHGlobalAnsi(privateKeyHex);
+        var urlPtr = (sbyte*)Marshal.StringToHGlobalAnsi(url);
+        var keyPtr = (sbyte*)Marshal.StringToHGlobalAnsi(privateKeyHex);
         try
         {
             var errPtr = NativeMethods.CreateClient(urlPtr, keyPtr, chainId, apiKeyIndex, accountIndex);
-            if (errPtr == IntPtr.Zero) return null;
+            if (errPtr == null) return null;
 
-            var err = Marshal.PtrToStringAnsi(errPtr);
+            var err = PtrToString(errPtr);
             Free(errPtr);
             return err;
         }
         finally
         {
-            Marshal.FreeHGlobal(urlPtr);
-            Marshal.FreeHGlobal(keyPtr);
+            Marshal.FreeHGlobal((IntPtr)urlPtr);
+            Marshal.FreeHGlobal((IntPtr)keyPtr);
         }
     }
 
@@ -71,8 +82,8 @@ public sealed class LighterSigner
     public static string? CheckClient(int apiKeyIndex, long accountIndex)
     {
         var errPtr = NativeMethods.CheckClient(apiKeyIndex, accountIndex);
-        if (errPtr == IntPtr.Zero) return null;
-        var err = Marshal.PtrToStringAnsi(errPtr);
+        if (errPtr == null) return null;
+        var err = PtrToString(errPtr);
         Free(errPtr);
         return err;
     }
@@ -83,7 +94,7 @@ public sealed class LighterSigner
         string pubKeyHex, int apiKeyIndex, long accountIndex,
         byte skipNonce = 0, long nonce = -1)
     {
-        var pubKeyPtr = Marshal.StringToHGlobalAnsi(pubKeyHex);
+        var pubKeyPtr = (sbyte*)Marshal.StringToHGlobalAnsi(pubKeyHex);
         try
         {
             var result = NativeMethods.SignChangePubKey(pubKeyPtr, skipNonce, nonce, apiKeyIndex, accountIndex);
@@ -91,7 +102,7 @@ public sealed class LighterSigner
         }
         finally
         {
-            Marshal.FreeHGlobal(pubKeyPtr);
+            Marshal.FreeHGlobal((IntPtr)pubKeyPtr);
         }
     }
 
@@ -112,40 +123,43 @@ public sealed class LighterSigner
 
     /// <summary>
     /// Represents one order leg for SignCreateGroupedOrders. Mirrors the
-    /// native CreateOrderTxReq struct field-for-field — keep in sync with
-    /// the generated struct in NativeMethods.g.cs if lighter-go ever changes
-    /// its shape (the CI's header-diff check will catch a shape change, but
-    /// won't catch a silent reordering that still compiles).
+    /// native CreateOrderTxReq struct field-for-field — verified directly
+    /// against the generated CreateOrderTxReq.cs (field order: MarketIndex,
+    /// ClientOrderIndex, BaseAmount, Price, IsAsk, Type, TimeInForce,
+    /// ReduceOnly, TriggerPrice, OrderExpiry). Keep in sync if lighter-go
+    /// ever changes its shape — the CI's header-diff check will catch a
+    /// shape change, but won't catch a silent reordering that still
+    /// compiles.
     /// </summary>
     public readonly record struct OrderLeg(
         short MarketIndex, long ClientOrderIndex, long BaseAmount, uint Price,
         bool IsAsk, byte OrderType, byte TimeInForce, bool ReduceOnly,
         uint TriggerPrice, long OrderExpiry);
 
-    public static unsafe SignedTx SignCreateGroupedOrders(
+    public static SignedTx SignCreateGroupedOrders(
         byte groupingType, OrderLeg[] orders, int apiKeyIndex, long accountIndex,
         long integratorAccountIndex = 0, int integratorTakerFee = 0, int integratorMakerFee = 0,
         byte skipNonce = 0, long nonce = -1)
     {
-        var native = new NativeMethods.CreateOrderTxReq[orders.Length];
+        var native = new CreateOrderTxReq[orders.Length];
         for (var i = 0; i < orders.Length; i++)
         {
-            native[i] = new NativeMethods.CreateOrderTxReq
+            native[i] = new CreateOrderTxReq
             {
                 MarketIndex = orders[i].MarketIndex,
-                ClientOrderIndex = orders[i].ClientOrderIndex,
-                BaseAmount = orders[i].BaseAmount,
+                ClientOrderIndex = (nint)orders[i].ClientOrderIndex,
+                BaseAmount = (nint)orders[i].BaseAmount,
                 Price = orders[i].Price,
                 IsAsk = (byte)(orders[i].IsAsk ? 1 : 0),
                 Type = orders[i].OrderType,
                 TimeInForce = orders[i].TimeInForce,
                 ReduceOnly = (byte)(orders[i].ReduceOnly ? 1 : 0),
                 TriggerPrice = orders[i].TriggerPrice,
-                OrderExpiry = orders[i].OrderExpiry,
+                OrderExpiry = (nint)orders[i].OrderExpiry,
             };
         }
 
-        fixed (NativeMethods.CreateOrderTxReq* ptr = native)
+        fixed (CreateOrderTxReq* ptr = native)
         {
             var result = NativeMethods.SignCreateGroupedOrders(
                 groupingType, ptr, native.Length,
@@ -194,7 +208,7 @@ public sealed class LighterSigner
         long amount, long usdcFee, string memo, int apiKeyIndex, long accountIndex,
         byte skipNonce = 0, long nonce = -1)
     {
-        var memoPtr = Marshal.StringToHGlobalAnsi(memo);
+        var memoPtr = (sbyte*)Marshal.StringToHGlobalAnsi(memo);
         try
         {
             var result = NativeMethods.SignTransfer(
@@ -204,7 +218,7 @@ public sealed class LighterSigner
         }
         finally
         {
-            Marshal.FreeHGlobal(memoPtr);
+            Marshal.FreeHGlobal((IntPtr)memoPtr);
         }
     }
 
@@ -325,7 +339,7 @@ public sealed class LighterSigner
 
     // --- internal helpers -------------------------------------------------
 
-    private static SignedTx UnwrapSignedTx(NativeMethods.SignedTxResponse result)
+    private static SignedTx UnwrapSignedTx(SignedTxResponse result)
     {
         try
         {
@@ -345,31 +359,34 @@ public sealed class LighterSigner
         }
     }
 
-    private static void ThrowIfError(IntPtr errPtr)
+    private static void ThrowIfError(sbyte* errPtr)
     {
-        if (errPtr == IntPtr.Zero) return;
-        var msg = Marshal.PtrToStringAnsi(errPtr);
+        if (errPtr == null) return;
+        var msg = PtrToString(errPtr);
         throw new LighterNativeException(msg ?? "unknown native error (null message with non-null err pointer)");
     }
 
-    private static string PtrToStringAndValidate(IntPtr ptr, string fieldName)
+    private static string PtrToStringAndValidate(sbyte* ptr, string fieldName)
     {
-        if (ptr == IntPtr.Zero)
+        if (ptr == null)
         {
             throw new LighterNativeException(
                 $"Native call returned a null pointer for '{fieldName}' with no error set. " +
                 "This indicates a struct-marshalling mismatch (see StructFixups.cs) rather than " +
                 "an application-level failure — do not retry, file an issue with platform + RID.");
         }
-        return Marshal.PtrToStringAnsi(ptr) ?? string.Empty;
+        return PtrToString(ptr) ?? string.Empty;
     }
 
-    private static void FreeIfNotNull(IntPtr ptr)
+    private static string? PtrToString(sbyte* ptr) =>
+        ptr == null ? null : Marshal.PtrToStringAnsi((IntPtr)ptr);
+
+    private static void FreeIfNotNull(sbyte* ptr)
     {
-        if (ptr != IntPtr.Zero) Free(ptr);
+        if (ptr != null) Free(ptr);
     }
 
-    private static void Free(IntPtr ptr) => NativeMethods.Free(ptr);
+    private static void Free(sbyte* ptr) => NativeMethods.Free(ptr);
 }
 
 public sealed class LighterNativeException : Exception
