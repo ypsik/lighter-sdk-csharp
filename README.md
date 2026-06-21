@@ -8,11 +8,7 @@ signing & hashing Lighter (zkLighter) perpetual futures transactions.
 end-to-end and one function (`GenerateApiKey`) has been exercised
 successfully against the real native library on linux-x64. The other 18
 sign functions compile and follow the identical pattern, but have not been
-called against a live signer or testnet. If you're picking this up: adding
-a smoke test per function (ideally with a known-good vector compared
-against the Go or Python SDK's output) is the highest-value next step,
-followed by getting the CI matrix to actually run on win-x64/linux-arm64/
-osx-arm64 instead of just linux-x64.
+called against a live signer or testnet.
 
 This repo automates the full pipeline: pull official native release assets →
 generate P/Invoke bindings from the official header via ClangSharp → build &
