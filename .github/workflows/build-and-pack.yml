@@ -426,8 +426,27 @@ jobs:
       - name: Restore & build managed wrapper
         run: dotnet build src/Lighter.Native/Lighter.Native.csproj -c Release
 
+      - name: Build test project
+        run: dotnet build tests/Lighter.Native.Tests/Lighter.Native.Tests.csproj -c Release
+
+      - name: Copy native library next to test binary
+        # dotnet test does NOT automatically copy RID-specific
+        # runtimes/{rid}/native/* assets from a referenced project into the
+        # test output directory — that layout convention only applies to
+        # NuGet packing (where consumers' tooling resolves the right RID
+        # folder at restore time). For a plain `dotnet test` run on this
+        # repo's own CI (always linux-x64), we have to place
+        # liblighter_signer.so next to the test DLL ourselves, or the
+        # DllImport("lighter_signer") P/Invoke call can't find it at runtime.
+        run: |
+          set -euo pipefail
+          TEST_OUT="tests/Lighter.Native.Tests/bin/Release/net8.0"
+          echo "Copying native lib into $TEST_OUT"
+          cp src/Lighter.Native/runtimes/linux-x64/native/liblighter_signer.so "$TEST_OUT/"
+          ls -la "$TEST_OUT"/*.so
+
       - name: Run smoke tests (struct marshalling, GenerateAPIKey round-trip)
-        run: dotnet test tests/Lighter.Native.Tests/Lighter.Native.Tests.csproj -c Release
+        run: dotnet test tests/Lighter.Native.Tests/Lighter.Native.Tests.csproj -c Release --no-build
 
       - name: Upload build output
         uses: actions/upload-artifact@v4
