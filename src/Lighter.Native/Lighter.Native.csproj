@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Lighter.Native</RootNamespace>
+    <AssemblyName>Lighter.Native</AssemblyName>
+
+    <!-- NuGet metadata -->
+    <PackageId>Lighter.Native</PackageId>
+    <Version>0.0.0</Version> <!-- overridden via -p:PackageVersion at pack time -->
+    <Authors>Aleks</Authors>
+    <Description>
+      C# P/Invoke bindings for elliottech/lighter-go's native signer library
+      (lighter_signer). Generated via ClangSharp from the official cgo-exported
+      header, with manual struct-marshalling fixups for cross-platform ABI
+      correctness. Supports win-x64, linux-x64, linux-arm64, osx-arm64.
+    </Description>
+    <PackageTags>lighter;zklighter;trading;signer;native;ffi</PackageTags>
+    <RepositoryUrl>https://github.com/ypsik/lighter-sdk-csharp</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <!-- Multi-RID native package: no managed RID-specific code, just assets -->
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Generated\NativeMethods.g.cs" />
+    <Compile Include="StructFixups.cs" />
+    <Compile Include="LighterSigner.cs" />
+  </ItemGroup>
+
+  <!--
+    Native assets per RID. These get copied into runtimes/{rid}/native by the
+    workflow before `dotnet pack` runs. We declare them here with the
+    standard NuGet RID-folder convention so consumers get automatic RID
+    resolution without any extra targets/props trickery.
+  -->
+  <ItemGroup>
+    <None Include="runtimes\win-x64\native\lighter_signer.dll" Condition="Exists('runtimes\win-x64\native\lighter_signer.dll')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes\win-x64\native\lighter_signer.dll</PackagePath>
+    </None>
+    <None Include="runtimes\linux-x64\native\liblighter_signer.so" Condition="Exists('runtimes\linux-x64\native\liblighter_signer.so')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes\linux-x64\native\liblighter_signer.so</PackagePath>
+    </None>
+    <None Include="runtimes\linux-arm64\native\liblighter_signer.so" Condition="Exists('runtimes\linux-arm64\native\liblighter_signer.so')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes\linux-arm64\native\liblighter_signer.so</PackagePath>
+    </None>
+    <None Include="runtimes\osx-arm64\native\liblighter_signer.dylib" Condition="Exists('runtimes\osx-arm64\native\liblighter_signer.dylib')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes\osx-arm64\native\liblighter_signer.dylib</PackagePath>
+    </None>
+  </ItemGroup>
+
+</Project>

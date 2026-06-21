@@ -1,0 +1,297 @@
+name: Build, Generate Bindings & Pack NuGet
+
+on:
+  workflow_dispatch:
+    inputs:
+      lighter_go_tag:
+        description: "lighter-go release tag to pull native assets from"
+        required: true
+        default: "v1.0.6"
+      package_version:
+        description: "NuGet package version (e.g. 1.0.6)"
+        required: true
+        default: "1.0.6"
+      publish_nuget:
+        description: "Push package to NuGet.org"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "lighter-go.version"
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  NATIVE_DIR: src/Lighter.Native/runtimes
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1) Pull official native assets (.dll/.so/.dylib + .h) from lighter-go
+  # ---------------------------------------------------------------------
+  fetch-native-assets:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve tag
+        id: resolve
+        run: |
+          TAG="${{ github.event.inputs.lighter_go_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(cat lighter-go.version 2>/dev/null || echo "v1.0.6")
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        working-directory: .
+        continue-on-error: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Re-resolve tag (after checkout, file-based fallback)
+        id: resolve2
+        run: |
+          TAG="${{ github.event.inputs.lighter_go_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(cat lighter-go.version 2>/dev/null || echo "v1.0.6")
+          fi
+          echo "Using lighter-go tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          TAG: ${{ steps.resolve2.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded
+          BASE="https://github.com/elliottech/lighter-go/releases/download/${TAG}"
+
+          ASSETS=(
+            "lighter-signer-windows-amd64.dll"
+            "lighter-signer-windows-amd64.h"
+            "lighter-signer-linux-amd64.so"
+            "lighter-signer-linux-amd64.h"
+            "lighter-signer-linux-arm64.so"
+            "lighter-signer-linux-arm64.h"
+            "lighter-signer-darwin-arm64.dylib"
+            "lighter-signer-darwin-arm64.h"
+          )
+
+          for asset in "${ASSETS[@]}"; do
+            echo "Downloading $asset"
+            curl -fSL --retry 3 -o "downloaded/$asset" "$BASE/$asset"
+          done
+
+          ls -la downloaded/
+
+      # Verify all 4 platform headers are byte-identical (they should be,
+      # since cgo generates the same C signatures regardless of GOOS/GOARCH).
+      # If they ever diverge, the build MUST fail loudly rather than silently
+      # picking one header as the canonical source for codegen.
+      - name: Verify headers are identical across platforms
+        run: |
+          set -euo pipefail
+          cd downloaded
+          REF="lighter-signer-windows-amd64.h"
+          for h in lighter-signer-linux-amd64.h lighter-signer-linux-arm64.h lighter-signer-darwin-arm64.h; do
+            if ! diff -q "$REF" "$h" > /dev/null; then
+              echo "::error::Header $h differs from $REF — cgo export signatures diverged across platforms."
+              echo "::error::This requires manual review before codegen can proceed safely."
+              diff "$REF" "$h" || true
+              exit 1
+            fi
+          done
+          echo "All headers identical. Safe to use $REF as canonical source."
+          cp "$REF" canonical-lighter-signer.h
+
+      - name: Upload native assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-assets
+          path: downloaded/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # 2) Generate P/Invoke bindings from the canonical header via ClangSharp
+  # ---------------------------------------------------------------------
+  generate-bindings:
+    needs: fetch-native-assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download native assets
+        uses: actions/download-artifact@v4
+        with:
+          name: native-assets
+          path: downloaded
+
+      - name: Install libclang (required by ClangSharp)
+        run: sudo apt-get update && sudo apt-get install -y libclang-14-dev
+
+      - name: Install ClangSharpPInvokeGenerator
+        run: dotnet tool install --global ClangSharpPInvokeGenerator
+
+      - name: Generate raw bindings
+        run: |
+          set -euo pipefail
+          mkdir -p generated
+          ~/.dotnet/tools/ClangSharpPInvokeGenerator \
+            -f downloaded/canonical-lighter-signer.h \
+            -n Lighter.Native.Generated \
+            -l lighter_signer \
+            -c exclude-enum-operators \
+            -o generated/NativeMethods.g.cs \
+            --methodClassName NativeMethods \
+            --config latest-codegen generate-macro-bindings unix-types
+
+      - name: Show generated output (for PR review)
+        run: cat generated/NativeMethods.g.cs
+
+      - name: Validate struct-by-value return signatures
+        # The .h declares SignedTxResponse / ApiKeyResponse / StrOrErr as
+        # struct-by-value RETURN types from extern "C" functions. This is the
+        # one part of the cgo header that is genuinely ABI-risky (different
+        # calling conventions classify small structs with pointer fields
+        # differently on x64 SysV vs ARM64 AAPCS vs Windows x64). We don't
+        # trust ClangSharp's default marshalling blindly here — fail the
+        # build if the generated file doesn't contain explicit StructLayout
+        # attributes on these three types, which is the manual fix-up this
+        # repo applies in src/Lighter.Native/StructFixups.cs.
+        run: |
+          set -euo pipefail
+          for t in SignedTxResponse ApiKeyResponse StrOrErr CreateOrderTxReq; do
+            if ! grep -q "struct $t" generated/NativeMethods.g.cs; then
+              echo "::error::Expected struct '$t' not found in generated bindings. Header may have changed shape."
+              exit 1
+            fi
+          done
+
+      - name: Upload generated bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-bindings
+          path: generated/NativeMethods.g.cs
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # 3) Build the managed wrapper + run struct-marshalling smoke tests
+  #    against every officially released native lib.
+  #
+  #    NOTE: osx-x64 (Intel Mac) is intentionally NOT covered. lighter-go's
+  #    releases only ship darwin-arm64; there is no upstream darwin-amd64
+  #    asset, and we deliberately decided not to cross-compile it ourselves
+  #    (would require an osxcross SDK toolchain in CI). Supported RIDs are:
+  #    win-x64, linux-x64, linux-arm64, osx-arm64.
+  # ---------------------------------------------------------------------
+  build-managed:
+    needs: [fetch-native-assets, generate-bindings]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download native assets
+        uses: actions/download-artifact@v4
+        with:
+          name: native-assets
+          path: downloaded
+
+      - name: Download generated bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-bindings
+          path: src/Lighter.Native/Generated
+
+      - name: Lay out runtimes/ folder (RID-specific native assets)
+        run: |
+          set -euo pipefail
+          d=src/Lighter.Native/runtimes
+          mkdir -p "$d/win-x64/native" "$d/linux-x64/native" "$d/linux-arm64/native" "$d/osx-arm64/native"
+
+          cp downloaded/lighter-signer-windows-amd64.dll "$d/win-x64/native/lighter_signer.dll"
+          cp downloaded/lighter-signer-linux-amd64.so    "$d/linux-x64/native/liblighter_signer.so"
+          cp downloaded/lighter-signer-linux-arm64.so    "$d/linux-arm64/native/liblighter_signer.so"
+          cp downloaded/lighter-signer-darwin-arm64.dylib "$d/osx-arm64/native/liblighter_signer.dylib"
+
+      - name: Restore & build managed wrapper
+        run: dotnet build src/Lighter.Native/Lighter.Native.csproj -c Release
+
+      - name: Run smoke tests (struct marshalling, GenerateAPIKey round-trip)
+        run: dotnet test tests/Lighter.Native.Tests/Lighter.Native.Tests.csproj -c Release
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-build
+          path: src/Lighter.Native/bin/Release/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # 4) Pack NuGet (multi-RID native package) — manual approval to publish
+  # ---------------------------------------------------------------------
+  pack-and-publish:
+    needs: build-managed
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Re-assemble runtimes/ for packing
+        run: |
+          set -euo pipefail
+          d=src/Lighter.Native/runtimes
+          mkdir -p "$d/win-x64/native" "$d/linux-x64/native" "$d/linux-arm64/native" "$d/osx-arm64/native"
+          cp artifacts/native-assets/lighter-signer-windows-amd64.dll "$d/win-x64/native/lighter_signer.dll"
+          cp artifacts/native-assets/lighter-signer-linux-amd64.so    "$d/linux-x64/native/liblighter_signer.so"
+          cp artifacts/native-assets/lighter-signer-linux-arm64.so    "$d/linux-arm64/native/liblighter_signer.so"
+          cp artifacts/native-assets/lighter-signer-darwin-arm64.dylib "$d/osx-arm64/native/liblighter_signer.dylib"
+          # osx-x64 intentionally unsupported — see README "Supported platforms".
+
+      - name: Pack
+        run: |
+          dotnet pack src/Lighter.Native/Lighter.Native.csproj \
+            -c Release \
+            -p:PackageVersion=${{ github.event.inputs.package_version }} \
+            -o nupkg
+
+      - name: Upload .nupkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: nupkg/*.nupkg
+
+      - name: Push to NuGet.org
+        if: ${{ github.event.inputs.publish_nuget == 'true' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NUGET_API_KEY:-}" ]; then
+            echo "::error::NUGET_API_KEY secret not set. Add it under Settings > Secrets before enabling publish."
+            exit 1
+          fi
+          dotnet nuget push "nupkg/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

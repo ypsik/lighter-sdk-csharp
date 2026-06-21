@@ -1,0 +1,12 @@
+bin/
+obj/
+nupkg/
+downloaded/
+generated/
+*.user
+.vs/
+.idea/
+src/Lighter.Native/runtimes/*/native/*.dll
+src/Lighter.Native/runtimes/*/native/*.so
+src/Lighter.Native/runtimes/*/native/*.dylib
+src/Lighter.Native/Generated/NativeMethods.g.cs
