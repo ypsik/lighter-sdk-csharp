@@ -222,6 +222,72 @@ jobs:
           find ~/.dotnet -iname '*libclang*' 2>/dev/null | xargs -r ls -la || echo "(ClangSharp shipped no bundled libclang)"
           echo "::endgroup::"
 
+      - name: Install libClangSharp native dependency
+        # ClangSharp needs TWO native libraries, not one: libclang (handled
+        # above, comes from apt) AND libClangSharp — a separate helper
+        # library that ClangSharp's own project ships to expose Clang APIs
+        # missing from libClang itself. This is NOT installable via apt; it
+        # only exists as a NuGet package (libClangSharp.runtime.linux-x64),
+        # and the dotnet-tool installer does not pull it in automatically —
+        # this is the exact limitation called out in the
+        # "Failed to resolve libClangSharp" / "*****IMPORTANT*****" message
+        # ClangSharp itself prints, with a pointer to
+        # https://github.com/dotnet/clangsharp for the manual-copy steps.
+        # We download the .nupkg directly from nuget.org's flat-container
+        # API (it's a zip), extract the .so, and place it next to where the
+        # ClangSharpPInvokeGenerator dotnet-tool actually looks (its own
+        # tool .store directory) — confirmed from the previous failure's
+        # stack trace, which showed the exact search paths attempted.
+        run: |
+          set -euo pipefail
+          which unzip > /dev/null || sudo apt-get install -y unzip
+          PKG_VERSION="18.1.3.1"
+          PKG_URL="https://api.nuget.org/v3-flatcontainer/libclangsharp.runtime.linux-x64/${PKG_VERSION}/libclangsharp.runtime.linux-x64.${PKG_VERSION}.nupkg"
+          echo "Downloading $PKG_URL"
+          if ! curl -fSL -o /tmp/libclangsharp.nupkg "$PKG_URL"; then
+            echo "::error::Could not download libClangSharp.runtime.linux-x64 version $PKG_VERSION."
+            echo "::error::This version was inferred from the win-x64 sibling package and may not exist for linux-x64."
+            echo "::group::Available versions (for manual lookup)"
+            curl -fSL "https://api.nuget.org/v3-flatcontainer/libclangsharp.runtime.linux-x64/index.json" || true
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          mkdir -p /tmp/libclangsharp-extracted
+          unzip -o /tmp/libclangsharp.nupkg -d /tmp/libclangsharp-extracted > /dev/null
+
+          echo "::group::Contents of extracted nupkg"
+          find /tmp/libclangsharp-extracted -iname '*.so*'
+          echo "::endgroup::"
+
+          SO_FILE=$(find /tmp/libclangsharp-extracted -iname 'libClangSharp.so' | head -n1)
+          if [ -z "$SO_FILE" ]; then
+            SO_FILE=$(find /tmp/libclangsharp-extracted -iname 'libClangSharp.so*' | head -n1)
+          fi
+          if [ -z "$SO_FILE" ]; then
+            echo "::error::Could not find libClangSharp.so inside the downloaded nupkg."
+            exit 1
+          fi
+          echo "Found SO_FILE=$SO_FILE"
+
+          # Place it everywhere the previous failure's stack trace showed
+          # ClangSharp actually probing: the dotnet-tool's own .store tool
+          # directory, plus the standard search dirs as a fallback.
+          TOOL_DIR=$(find ~/.dotnet/tools/.store/clangsharppinvokegenerator -maxdepth 5 -type d -iname 'any' 2>/dev/null | head -n1)
+          echo "TOOL_DIR=$TOOL_DIR"
+          if [ -n "$TOOL_DIR" ]; then
+            cp "$SO_FILE" "$TOOL_DIR/libClangSharp.so"
+          fi
+
+          for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
+            sudo cp "$SO_FILE" "$dir/libClangSharp.so"
+          done
+          sudo ldconfig || true
+
+          echo "::group::Verify libClangSharp.so is now in place"
+          find ~/.dotnet/tools /usr/lib /usr/local/lib -iname 'libClangSharp.so' 2>/dev/null | xargs -r ls -la
+          echo "::endgroup::"
+
       - name: Generate raw bindings
         run: |
           set -uo pipefail   # NOTE: -e deliberately omitted here — we want
