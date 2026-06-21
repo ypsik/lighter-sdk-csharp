@@ -161,38 +161,37 @@ jobs:
           path: downloaded
 
       - name: Install libclang for ClangSharp
-        # ClangSharpPInvokeGenerator as a global dotnet tool does not reliably
-        # pull in its native libclang dependency (known ClangSharp limitation,
-        # see https://github.com/dotnet/clangsharp). apt installs
-        # libclang-14-dev under /usr/lib/llvm-14/lib/libclang-14.so — a path
-        # NOT in the default ldconfig search path, and even there it's a
-        # versioned name. The .NET native-library loader looks for the bare
-        # unversioned `libclang.so`. We symlink it into a standard search
-        # path AND export LD_LIBRARY_PATH as a second mechanism, since one
-        # of the two should satisfy whichever lookup strategy the .NET
-        # native resolver actually uses (this has been iterated on blind —
-        # see the exhaustive debug dump below so any future failure is
-        # diagnosable from ONE log instead of another back-and-forth).
+        # ClangSharp checks the libClang version string at startup and
+        # rejects mismatches outright. ClangSharpPInvokeGenerator's version
+        # number tracks the LLVM major version it expects (18.1.0 wants a
+        # version string containing "version 18.1", 21.x wants "21.1", etc.)
+        # — this was discovered empirically across several failed attempts:
+        # latest ClangSharp (21.x) rejected libclang-14 ("does not contain
+        # version 21.1"), and pinning ClangSharp down to 18.1.0 then
+        # rejected libclang-14 too ("does not contain version 18.1"), which
+        # is what tells us the fix is on the libclang side, not the
+        # ClangSharp side: install libclang-18-dev to match the already-
+        # pinned ClangSharp 18.1.0 below. libclang-18-dev is available
+        # directly in Ubuntu noble's own apt repos (no apt.llvm.org repo
+        # needed) per https://packages.ubuntu.com/noble/devel/llvm-18.
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y libclang-14-dev
+          sudo apt-get update && sudo apt-get install -y libclang-18-dev
 
           echo "::group::Locate all libclang* files on the system"
           find /usr/lib /usr/local/lib /lib -iname '*libclang*' 2>/dev/null | xargs -r ls -la
           echo "::endgroup::"
 
-          CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so' 2>/dev/null | head -n1)
+          CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-18.so' 2>/dev/null | head -n1)
           if [ -z "$CLANG_SO" ]; then
-            CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so*' 2>/dev/null | head -n1)
+            CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-18.so*' 2>/dev/null | head -n1)
           fi
           if [ -z "$CLANG_SO" ]; then
-            echo "::error::Could not locate any libclang-14.so* after apt install."
+            echo "::error::Could not locate any libclang-18.so* after apt install."
             exit 1
           fi
           echo "Selected CLANG_SO=$CLANG_SO"
 
-          # Symlink into every plausible default search dir, not just one —
-          # cheap to do, removes ambiguity about which path the loader uses.
           for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
             sudo mkdir -p "$dir"
             sudo ln -sf "$CLANG_SO" "$dir/libclang.so"
@@ -200,29 +199,22 @@ jobs:
           sudo ldconfig || true
 
           echo "::group::Post-symlink state"
-          echo "--- all libclang.so symlinks now present ---"
           find /usr/lib /usr/local/lib /lib -iname 'libclang.so' 2>/dev/null | xargs -r ls -la
-          echo "--- ldconfig cache (informational only — known to skip bare .so symlinks) ---"
           ldconfig -p | grep -i libclang || echo "(nothing matched — expected if ldconfig only tracks versioned sonames)"
           echo "::endgroup::"
 
-          # Belt-and-suspenders: export LD_LIBRARY_PATH for every dir we
-          # symlinked into, for all subsequent steps in this job.
           echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install ClangSharpPInvokeGenerator
-        # Pin to 18.1.0: ClangSharp checks the libClang version string at
-        # startup and rejects mismatches outright (we hit exactly this:
-        # latest ClangSharp (21.x) demands libclang 'version 21.1', but
-        # Ubuntu noble's apt repos only carry libclang-14 (14.0.6) — there
-        # is no newer libclang in the default repos without adding LLVM's
-        # own apt repo, which is more moving parts than necessary here.
-        # ClangSharp 18.1.0 was the generation built/tested against LLVM 14,
-        # matching what apt gives us. If a future bump of libclang-14-dev to
-        # a newer Ubuntu LTS image changes the available version, this pin
-        # needs to move in lockstep — check `clang --version` output above
-        # against https://www.nuget.org/packages/ClangSharpPInvokeGenerator
-        # for which ClangSharp release matches.
+        # Pinned to 18.1.0 to match the libclang-18 installed above.
+        # ClangSharp's major.minor must match libClang's reported version
+        # string exactly (it does a substring check at startup) — see the
+        # comment on the libclang install step for how this was determined.
+        # If apt's available libclang-N-dev version ever changes (e.g. a
+        # future Ubuntu LTS image), this pin and the libclang-N-dev package
+        # name above both need to move together; check
+        # https://www.nuget.org/packages/ClangSharpPInvokeGenerator for
+        # which release matches the new N.
         run: |
           dotnet tool install --global ClangSharpPInvokeGenerator --version 18.1.0
           echo "::group::Confirm tool installed + its own native deps"
