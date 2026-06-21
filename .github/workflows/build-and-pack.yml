@@ -104,6 +104,7 @@ jobs:
           cd downloaded
           extract_signatures() {
             grep -E '^\s*extern\s' "$1" \
+              | grep -v '_GoString_\|_GoStringPtr\|_GoStringLen\|^extern.*\b_Go' \
               | sed 's/__declspec(dllexport) //g' \
               | sed 's/long long int/long long/g' \
               | sed 's/long long unsigned int/unsigned long long/g' \
