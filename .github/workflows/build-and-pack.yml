@@ -182,11 +182,28 @@ jobs:
             echo "::error::Could not locate any libclang-14.so* after apt install."
             exit 1
           fi
-          echo "Found $CLANG_SO"
+          echo "Found CLANG_SO=$CLANG_SO"
+          ls -la "$CLANG_SO"
+
           sudo mkdir -p /usr/lib/x86_64-linux-gnu
           sudo ln -sf "$CLANG_SO" /usr/lib/x86_64-linux-gnu/libclang.so
+          echo "--- contents of target dir matching libclang ---"
+          ls -la /usr/lib/x86_64-linux-gnu/ | grep -i libclang
+          echo "--- does the symlink resolve via ls -laL? ---"
+          ls -laL /usr/lib/x86_64-linux-gnu/libclang.so
+
           sudo ldconfig
-          ldconfig -p | grep -x '.*libclang\.so.*' || { echo "::error::libclang.so (unversioned) still not resolvable after symlink."; ldconfig -p | grep -i libclang; exit 1; }
+          echo "--- ldconfig cache after update ---"
+          ldconfig -p | grep -i libclang
+
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libclang.so ]; then
+            echo "::error::Symlink /usr/lib/x86_64-linux-gnu/libclang.so does not exist after ln -sf."
+            exit 1
+          fi
+          if ! ldconfig -p | grep -qx '\s*libclang\.so (libc6,x86-64) => .*'; then
+            echo "::error::libclang.so (unversioned) still not in ldconfig cache after symlink + ldconfig run."
+            echo "::error::The symlink file itself exists at /usr/lib/x86_64-linux-gnu/libclang.so but ldconfig isn't picking it up — likely because ldconfig only caches versioned sonames (libfoo.so.N), not bare .so symlinks meant for dlopen/dynamic linking at compile-time. This may be expected; falling through to LD_LIBRARY_PATH fallback below instead of hard-failing."
+          fi
           # Export for subsequent steps as a belt-and-suspenders fallback in
           # case the freshly-updated ldconfig cache isn't picked up by the
           # .NET runtime's own library probing in the same job.
