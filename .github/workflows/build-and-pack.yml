@@ -167,13 +167,20 @@ jobs:
         # libclang-14-dev under /usr/lib/llvm-14/lib/libclang-14.so — a path
         # NOT in the default ldconfig search path, and even there it's a
         # versioned name. The .NET native-library loader looks for the bare
-        # unversioned `libclang.so` in a path ldconfig actually indexes. We
-        # symlink it into /usr/lib/x86_64-linux-gnu (always present, always
-        # in the default search path on Ubuntu) rather than next to the
-        # original file.
+        # unversioned `libclang.so`. We symlink it into a standard search
+        # path AND export LD_LIBRARY_PATH as a second mechanism, since one
+        # of the two should satisfy whichever lookup strategy the .NET
+        # native resolver actually uses (this has been iterated on blind —
+        # see the exhaustive debug dump below so any future failure is
+        # diagnosable from ONE log instead of another back-and-forth).
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y libclang-14-dev
+
+          echo "::group::Locate all libclang* files on the system"
+          find /usr/lib /usr/local/lib /lib -iname '*libclang*' 2>/dev/null | xargs -r ls -la
+          echo "::endgroup::"
+
           CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so' 2>/dev/null | head -n1)
           if [ -z "$CLANG_SO" ]; then
             CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so*' 2>/dev/null | head -n1)
@@ -182,40 +189,62 @@ jobs:
             echo "::error::Could not locate any libclang-14.so* after apt install."
             exit 1
           fi
-          echo "Found CLANG_SO=$CLANG_SO"
-          ls -la "$CLANG_SO"
+          echo "Selected CLANG_SO=$CLANG_SO"
 
-          sudo mkdir -p /usr/lib/x86_64-linux-gnu
-          sudo ln -sf "$CLANG_SO" /usr/lib/x86_64-linux-gnu/libclang.so
-          echo "--- contents of target dir matching libclang ---"
-          ls -la /usr/lib/x86_64-linux-gnu/ | grep -i libclang
-          echo "--- does the symlink resolve via ls -laL? ---"
-          ls -laL /usr/lib/x86_64-linux-gnu/libclang.so
+          # Symlink into every plausible default search dir, not just one —
+          # cheap to do, removes ambiguity about which path the loader uses.
+          for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
+            sudo mkdir -p "$dir"
+            sudo ln -sf "$CLANG_SO" "$dir/libclang.so"
+          done
+          sudo ldconfig || true
 
-          sudo ldconfig
-          echo "--- ldconfig cache after update ---"
-          ldconfig -p | grep -i libclang
+          echo "::group::Post-symlink state"
+          echo "--- all libclang.so symlinks now present ---"
+          find /usr/lib /usr/local/lib /lib -iname 'libclang.so' 2>/dev/null | xargs -r ls -la
+          echo "--- ldconfig cache (informational only — known to skip bare .so symlinks) ---"
+          ldconfig -p | grep -i libclang || echo "(nothing matched — expected if ldconfig only tracks versioned sonames)"
+          echo "::endgroup::"
 
-          if [ ! -e /usr/lib/x86_64-linux-gnu/libclang.so ]; then
-            echo "::error::Symlink /usr/lib/x86_64-linux-gnu/libclang.so does not exist after ln -sf."
-            exit 1
-          fi
-          if ! ldconfig -p | grep -qx '\s*libclang\.so (libc6,x86-64) => .*'; then
-            echo "::error::libclang.so (unversioned) still not in ldconfig cache after symlink + ldconfig run."
-            echo "::error::The symlink file itself exists at /usr/lib/x86_64-linux-gnu/libclang.so but ldconfig isn't picking it up — likely because ldconfig only caches versioned sonames (libfoo.so.N), not bare .so symlinks meant for dlopen/dynamic linking at compile-time. This may be expected; falling through to LD_LIBRARY_PATH fallback below instead of hard-failing."
-          fi
-          # Export for subsequent steps as a belt-and-suspenders fallback in
-          # case the freshly-updated ldconfig cache isn't picked up by the
-          # .NET runtime's own library probing in the same job.
-          echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          # Belt-and-suspenders: export LD_LIBRARY_PATH for every dir we
+          # symlinked into, for all subsequent steps in this job.
+          echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install ClangSharpPInvokeGenerator
-        run: dotnet tool install --global ClangSharpPInvokeGenerator
+        # Pin to 18.1.0: ClangSharp checks the libClang version string at
+        # startup and rejects mismatches outright (we hit exactly this:
+        # latest ClangSharp (21.x) demands libclang 'version 21.1', but
+        # Ubuntu noble's apt repos only carry libclang-14 (14.0.6) — there
+        # is no newer libclang in the default repos without adding LLVM's
+        # own apt repo, which is more moving parts than necessary here.
+        # ClangSharp 18.1.0 was the generation built/tested against LLVM 14,
+        # matching what apt gives us. If a future bump of libclang-14-dev to
+        # a newer Ubuntu LTS image changes the available version, this pin
+        # needs to move in lockstep — check `clang --version` output above
+        # against https://www.nuget.org/packages/ClangSharpPInvokeGenerator
+        # for which ClangSharp release matches.
+        run: |
+          dotnet tool install --global ClangSharpPInvokeGenerator --version 18.1.0
+          echo "::group::Confirm tool installed + its own native deps"
+          ls -la ~/.dotnet/tools/
+          find ~/.dotnet -iname '*libclang*' 2>/dev/null | xargs -r ls -la || echo "(ClangSharp shipped no bundled libclang)"
+          echo "::endgroup::"
 
       - name: Generate raw bindings
         run: |
-          set -euo pipefail
+          set -uo pipefail   # NOTE: -e deliberately omitted here — we want
+                              # the diagnostic dump below to run even if the
+                              # generator call fails, then exit non-zero
+                              # ourselves afterward.
           mkdir -p generated
+
+          echo "::group::Environment going into ClangSharp call"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          echo "PATH=$PATH"
+          GENERATOR_DLL=$(find ~/.dotnet/tools -iname 'ClangSharpPInvokeGenerator.dll' 2>/dev/null | head -n1)
+          echo "GENERATOR_DLL=$GENERATOR_DLL"
+          echo "::endgroup::"
+
           ~/.dotnet/tools/ClangSharpPInvokeGenerator \
             -f downloaded/canonical-lighter-signer.h \
             -n Lighter.Native.Generated \
@@ -224,6 +253,16 @@ jobs:
             -o generated/NativeMethods.g.cs \
             --methodClassName NativeMethods \
             --config latest-codegen generate-macro-bindings unix-types
+          STATUS=$?
+
+          if [ $STATUS -ne 0 ]; then
+            echo "::error::ClangSharpPInvokeGenerator exited with status $STATUS."
+            echo "::group::Full libclang search state at time of failure"
+            find /usr/lib /usr/local/lib /lib -iname '*libclang*' 2>/dev/null | xargs -r ls -la
+            echo "LD_LIBRARY_PATH was: $LD_LIBRARY_PATH"
+            echo "::endgroup::"
+            exit $STATUS
+          fi
 
       - name: Show generated output (for PR review)
         run: cat generated/NativeMethods.g.cs
