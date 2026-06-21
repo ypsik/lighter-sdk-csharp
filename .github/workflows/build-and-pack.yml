@@ -324,9 +324,9 @@ jobs:
             -n Lighter.Native.Generated \
             -l lighter_signer \
             -c exclude-enum-operators \
-            -o generated/NativeMethods.g.cs \
+            -o generated/ \
             --methodClassName NativeMethods \
-            --config latest-codegen generate-macro-bindings unix-types generate-helper-types
+            --config latest-codegen generate-macro-bindings unix-types generate-helper-types multi-file
           STATUS=$?
 
           if [ $STATUS -ne 0 ]; then
@@ -339,7 +339,15 @@ jobs:
           fi
 
       - name: Show generated output (for PR review)
-        run: cat generated/NativeMethods.g.cs
+        run: |
+          echo "::group::Files generated (multi-file mode)"
+          ls -la generated/
+          echo "::endgroup::"
+          for f in generated/*.cs; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
 
       - name: Validate struct-by-value return signatures
         # The .h declares SignedTxResponse / ApiKeyResponse / StrOrErr as
@@ -351,10 +359,14 @@ jobs:
         # build if the generated file doesn't contain explicit StructLayout
         # attributes on these three types, which is the manual fix-up this
         # repo applies in src/Lighter.Native/StructFixups.cs.
+        #
+        # NOTE: multi-file codegen splits structs across separate .cs files
+        # (one per type, generally), so we grep the whole generated/
+        # directory rather than a single named file.
         run: |
           set -euo pipefail
           for t in SignedTxResponse ApiKeyResponse StrOrErr CreateOrderTxReq; do
-            if ! grep -q "struct $t" generated/NativeMethods.g.cs; then
+            if ! grep -rq "struct $t" generated/; then
               echo "::error::Expected struct '$t' not found in generated bindings. Header may have changed shape."
               exit 1
             fi
@@ -364,7 +376,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: generated-bindings
-          path: generated/NativeMethods.g.cs
+          path: generated/
           retention-days: 7
 
   # ---------------------------------------------------------------------
