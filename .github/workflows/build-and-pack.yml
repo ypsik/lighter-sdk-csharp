@@ -174,9 +174,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y libclang-14-dev
-          CLANG_SO=$(find / -xdev -name 'libclang-14.so' 2>/dev/null | head -n1)
+          CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so' 2>/dev/null | head -n1)
           if [ -z "$CLANG_SO" ]; then
-            CLANG_SO=$(find / -name 'libclang-14.so*' 2>/dev/null | head -n1)
+            CLANG_SO=$(find /usr/lib /usr/local/lib /lib -name 'libclang-14.so*' 2>/dev/null | head -n1)
           fi
           if [ -z "$CLANG_SO" ]; then
             echo "::error::Could not locate any libclang-14.so* after apt install."
