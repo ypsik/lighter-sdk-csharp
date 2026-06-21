@@ -4,9 +4,19 @@ C# P/Invoke bindings for [`elliottech/lighter-go`](https://github.com/elliottech
 native `lighter_signer` shared library — the reference implementation for
 signing & hashing Lighter (zkLighter) perpetual futures transactions.
 
+**Status: working scaffold, not production-verified.** The CI pipeline runs
+end-to-end and one function (`GenerateApiKey`) has been exercised
+successfully against the real native library on linux-x64. The other 18
+sign functions compile and follow the identical pattern, but have not been
+called against a live signer or testnet. If you're picking this up: adding
+a smoke test per function (ideally with a known-good vector compared
+against the Go or Python SDK's output) is the highest-value next step,
+followed by getting the CI matrix to actually run on win-x64/linux-arm64/
+osx-arm64 instead of just linux-x64.
+
 This repo automates the full pipeline: pull official native release assets →
 generate P/Invoke bindings from the official header via ClangSharp → build &
-smoke-test on every target platform → pack a multi-RID NuGet package.
+smoke-test on linux-x64 → pack a multi-RID NuGet package.
 
 ## Supported platforms
 
@@ -36,14 +46,23 @@ packing.
    instead of silently picking one as canonical).
 
 2. **`generate-bindings`** — runs `ClangSharpPInvokeGenerator` against the
-   canonical header to produce `NativeMethods.g.cs`. This works cleanly here
-   because the cgo preamble declares plain C structs (`char*`, `uint8_t`,
-   `int64_t` fields only — no Go-specific `GoString`/`GoSlice` types leak
-   into the exported header).
+   canonical header to produce one `.cs` file per type/class in `generated/`
+   (multi-file mode — needed because `generate-helper-types` emits a
+   `NativeTypeNameAttribute` class with its own `using` directives, which
+   only compiles cleanly in its own file). This works cleanly here because
+   the cgo preamble declares plain C structs (`char*`, `uint8_t`, `int64_t`
+   fields only — no Go-specific `GoString`/`GoSlice` types leak into the
+   exported header, aside from a couple of internal `_Go*` helper
+   declarations that get filtered out before codegen).
 
 3. **`build-managed`** — copies native assets into `runtimes/{rid}/native/`,
    builds the managed wrapper, and runs the smoke tests in
-   `tests/Lighter.Native.Tests` **on each platform**.
+   `tests/Lighter.Native.Tests`. **Important caveat:** this job runs on a
+   single `ubuntu-latest` runner — there is no CI matrix across
+   win-x64/linux-arm64/osx-arm64. Only linux-x64 is actually exercised at
+   runtime; the other three RIDs are compiled into the package but never
+   invoked in CI. See "What's wrapped" below for what this does and doesn't
+   tell you.
 
 4. **`pack-and-publish`** — packs the multi-RID `.nupkg` and optionally
    pushes to NuGet.org (gated behind a manual `workflow_dispatch` boolean +
@@ -61,15 +80,20 @@ blittable structs with [StructLayout(Sequential)]*, which is what ClangSharp
 generates by default for this header — but "should be fine by default" is
 exactly the kind of claim this codebase does not want to ship un-verified.
 
-That's why `tests/Lighter.Native.Tests/NativeSmokeTests.cs` runs on every
-platform in CI before packing: it calls `GenerateAPIKey()` repeatedly and
-asserts the returned key pair is well-formed hex, distinct across calls, and
-doesn't crash the allocator across 50 iterations of native `Free()`. See the
-comments in `src/Lighter.Native/StructFixups.cs` for what a failure here
-would look like and how to diagnose it — that file is the designated landing
-spot for a manual override if a future `lighter-go` release ever changes a
-struct's shape and the CI's `Validate struct-by-value return signatures` step
-catches it.
+That's why `tests/Lighter.Native.Tests/NativeSmokeTests.cs` runs before
+packing: it calls `GenerateAPIKey()` repeatedly and asserts the returned key
+pair is well-formed hex, distinct across calls, and doesn't crash the
+allocator across 50 iterations of native `Free()`. **This has passed on
+linux-x64 in CI** — the struct-by-value marshalling for `ApiKeyResponse`
+(and by extension the same pattern in `SignedTxResponse`/`StrOrErr`) is
+confirmed working on that one platform. It has NOT been run on win-x64,
+linux-arm64, or osx-arm64 — those are unverified, since CI only runs on a
+single `ubuntu-latest` runner. See the comments in
+`src/Lighter.Native/StructFixups.cs` for what a failure here would look like
+and how to diagnose it on another platform — that file is the designated
+landing spot for a manual override if a future `lighter-go` release ever
+changes a struct's shape and the CI's `Validate struct-by-value return
+signatures` step catches it.
 
 ## What's wrapped
 
@@ -100,12 +124,32 @@ SDK's output for the same input) — exactly the kind of thing that "will be
 visible later if something doesn't run," per the project's working style,
 rather than something to pre-verify by guessing.
 
-`SignCreateGroupedOrders` additionally passes an array of `OrderLeg` structs
-by pointer — double-check `OrderLeg`'s field order against whatever
-`NativeMethods.g.cs` actually generates for `CreateOrderTxReq` once ClangSharp
-has run; the manual mirror in `LighterSigner.cs` was written from the cgo
-preamble source, not from inspecting generated output (no .NET runtime was
-available to run ClangSharp during initial authoring of this repo).
+## Type quirks found by inspecting the actual generated output
+
+Two ClangSharp codegen surprises were found by downloading a real CI run's
+`generated-bindings` artifact and reading it directly — not by guessing from
+the cgo source. Both are already fixed in `LighterSigner.cs`, documented here
+so a future header change doesn't reintroduce the same confusion:
+
+- **`char*` parameters/fields generate as `sbyte*`, not `IntPtr`.** Every
+  `Marshal.StringToHGlobalAnsi`/`PtrToStringAnsi` call site in
+  `LighterSigner.cs` casts between the two accordingly, and the whole class
+  is `unsafe` because of it.
+- **`CreateOrderTxReq`'s `int64_t` fields (`ClientOrderIndex`, `BaseAmount`,
+  `OrderExpiry`) generate as `nint`, not `long`** — inconsistent with the
+  same native type showing up as `long` in plain method *parameters*
+  elsewhere. `OrderLeg`'s mapping in `SignCreateGroupedOrders` casts
+  explicitly for this. Field order itself (`MarketIndex`,
+  `ClientOrderIndex`, `BaseAmount`, `Price`, `IsAsk`, `Type`, `TimeInForce`,
+  `ReduceOnly`, `TriggerPrice`, `OrderExpiry`) was confirmed correct against
+  the generated `CreateOrderTxReq.cs`.
+
+If `lighter-go` changes this struct's shape, the CI's "Validate
+struct-by-value return signatures" check will catch a missing/renamed field,
+but won't catch a silent type change (e.g. `nint` becoming something else)
+— if `SignCreateGroupedOrders` starts failing, download that run's
+`generated-bindings` artifact and diff `CreateOrderTxReq.cs` against this
+section before changing anything in `LighterSigner.cs`.
 
 ## Manually triggering a release
 
