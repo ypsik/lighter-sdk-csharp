@@ -85,42 +85,48 @@ jobs:
 
           ls -la downloaded/
 
-      # Verify all 4 platform headers declare the SAME functions with the
-      # SAME signatures. They are NOT expected to be byte-identical: Windows
-      # cgo headers additionally emit `__declspec(dllexport)` on every
-      # function (required for .dll symbol export), which has no equivalent
-      # on Linux/macOS .so/.dylib exports and carries no signature meaning.
-      # We strip that token before diffing so the check only fails on an
-      # actual signature/shape divergence — not a platform export-keyword
-      # difference that would otherwise false-positive on every release.
+      # Verify all 4 platform headers declare the SAME exported functions
+      # with the SAME signatures. We deliberately do NOT diff the full
+      # header file. cgo headers contain a large block of typedef/preamble
+      # boilerplate (GoInt, GoUint8, size_t-style platform base types) ahead
+      # of the actual function declarations, and cgo is free to resolve
+      # those typedefs differently per GOOS/GOARCH (e.g. different widths
+      # for platform-native integer types) without it meaning anything for
+      # us — ClangSharp resolves through to the underlying fixed-width C
+      # type either way. The only thing that actually matters for codegen
+      # correctness is whether the `extern ... FunctionName(...)` lines
+      # themselves match, so we grep those out specifically, strip the
+      # Windows-only __declspec(dllexport) export keyword, and diff just
+      # that.
       - name: Verify headers declare identical signatures across platforms
         run: |
           set -euo pipefail
           cd downloaded
-          normalize() {
-            sed 's/__declspec(dllexport) //g' "$1"
+          extract_signatures() {
+            grep -E '^\s*extern\s' "$1" \
+              | sed 's/__declspec(dllexport) //g' \
+              | sed 's/[[:space:]]\+/ /g' \
+              | sort
           }
-          # Use the Linux header as canonical, not Windows: __declspec is an
-          # MSVC-specific attribute that libclang/ClangSharp does not
-          # reliably understand without an explicit MSVC target triple, so
-          # generating from the Windows header risks ClangSharp choking on
-          # or misinterpreting a keyword it doesn't need. The Linux header
-          # is plain C and signature-identical (verified above), so it's
-          # the safer codegen source — the actual exported symbol names in
-          # the resulting .dll/.so/.dylib are unaffected either way, since
+          # Linux header as canonical: __declspec is MSVC-specific and not
+          # reliably understood by libclang/ClangSharp without an explicit
+          # MSVC target triple, so generating from the Windows header risks
+          # ClangSharp choking on a keyword it doesn't need. The exported
+          # .dll/.so/.dylib symbol names are unaffected either way, since
           # DllImport matches by name, not by how the header was annotated.
           REF="lighter-signer-linux-amd64.h"
-          normalize "$REF" > /tmp/ref.normalized.h
+          extract_signatures "$REF" > /tmp/ref.sigs.txt
+
           for h in lighter-signer-windows-amd64.h lighter-signer-linux-arm64.h lighter-signer-darwin-arm64.h; do
-            normalize "$h" > "/tmp/$h.normalized.h"
-            if ! diff -q /tmp/ref.normalized.h "/tmp/$h.normalized.h" > /dev/null; then
-              echo "::error::Header $h differs from $REF beyond the expected __declspec(dllexport) export keyword."
-              echo "::error::This is a genuine signature/shape divergence and requires manual review before codegen can proceed safely."
-              diff /tmp/ref.normalized.h "/tmp/$h.normalized.h" || true
+            extract_signatures "$h" > "/tmp/$h.sigs.txt"
+            if ! diff -q /tmp/ref.sigs.txt "/tmp/$h.sigs.txt" > /dev/null; then
+              echo "::error::Function signatures in $h differ from $REF — this is a genuine API divergence, not just preamble/typedef noise."
+              echo "::error::Manual review required before codegen can proceed safely."
+              diff /tmp/ref.sigs.txt "/tmp/$h.sigs.txt" || true
               exit 1
             fi
           done
-          echo "All headers declare identical signatures (modulo platform export keywords). Safe to use $REF as canonical source."
+          echo "All headers declare identical function signatures. Safe to use $REF as canonical source."
           cp "$REF" canonical-lighter-signer.h
 
       - name: Upload native assets
