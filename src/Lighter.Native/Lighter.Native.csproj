@@ -28,17 +28,15 @@
   </PropertyGroup>
 
   <!--
-    The ClangSharp-generated code in Generated/NativeMethods.g.cs decorates
-    parameters/fields with [NativeTypeName("...")] to document the original
-    C type (e.g. "uint8_t") it was generated from. That attribute class
-    itself is NOT part of the generated output — it lives in the
-    ClangSharp.Interop NuGet package (the same project's runtime support
-    library), and must be referenced here or every generated file fails to
-    compile with CS0246 "NativeTypeNameAttribute could not be found".
+    NOTE on [NativeTypeName(...)] attributes in the generated code: these
+    are NOT resolved via a NuGet package reference (a ClangSharp.Interop
+    PackageReference here does NOT fix CS0246 for NativeTypeNameAttribute —
+    tried that, it doesn't help). The actual fix is in the workflow's
+    ClangSharpPInvokeGenerator invocation: passing the `generate-helper-types`
+    config flag makes the generator emit the NativeTypeNameAttribute class
+    itself directly into the generated output file, alongside the bindings
+    that use it. See .github/workflows/build-and-pack.yml.
   -->
-  <ItemGroup>
-    <PackageReference Include="ClangSharp.Interop" Version="18.1.0" />
-  </ItemGroup>
 
   <!--
     No explicit <Compile Include> here: the .NET SDK's default item globbing

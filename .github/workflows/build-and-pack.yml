@@ -326,7 +326,7 @@ jobs:
             -c exclude-enum-operators \
             -o generated/NativeMethods.g.cs \
             --methodClassName NativeMethods \
-            --config latest-codegen generate-macro-bindings unix-types
+            --config latest-codegen generate-macro-bindings unix-types generate-helper-types
           STATUS=$?
 
           if [ $STATUS -ne 0 ]; then
