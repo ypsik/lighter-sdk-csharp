@@ -27,11 +27,13 @@
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Include="Generated\NativeMethods.g.cs" />
-    <Compile Include="StructFixups.cs" />
-    <Compile Include="LighterSigner.cs" />
-  </ItemGroup>
+  <!--
+    No explicit <Compile Include> here: the .NET SDK's default item globbing
+    (EnableDefaultCompileItems, on by default) already picks up every .cs
+    file under this project directory — including Generated/NativeMethods.g.cs,
+    StructFixups.cs, and LighterSigner.cs. Listing them again explicitly
+    caused NETSDK1022 (duplicate Compile items).
+  -->
 
   <!--
     Native assets per RID. These get copied into runtimes/{rid}/native by the
