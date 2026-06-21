@@ -195,6 +195,12 @@ jobs:
           for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
             sudo mkdir -p "$dir"
             sudo ln -sf "$CLANG_SO" "$dir/libclang.so"
+            # libClangSharp.so (a separate native dep installed in a later
+            # step) was observed to look specifically for the versioned
+            # name "libclang.so.18.1", not just the bare "libclang.so" —
+            # confirmed from a DllNotFoundException search-path list that
+            # included exactly that string. Cover both names.
+            sudo ln -sf "$CLANG_SO" "$dir/libclang.so.18.1"
           done
           sudo ldconfig || true
 
@@ -270,14 +276,24 @@ jobs:
           fi
           echo "Found SO_FILE=$SO_FILE"
 
-          # Place it everywhere the previous failure's stack trace showed
-          # ClangSharp actually probing: the dotnet-tool's own .store tool
-          # directory, plus the standard search dirs as a fallback.
-          TOOL_DIR=$(find ~/.dotnet/tools/.store/clangsharppinvokegenerator -maxdepth 5 -type d -iname 'any' 2>/dev/null | head -n1)
-          echo "TOOL_DIR=$TOOL_DIR"
-          if [ -n "$TOOL_DIR" ]; then
-            cp "$SO_FILE" "$TOOL_DIR/libClangSharp.so"
+          # Construct the exact path directly from the version we pinned
+          # ClangSharpPInvokeGenerator to above (18.1.0), rather than
+          # guessing with find — a previous attempt's `find` here came back
+          # empty even though the directory does exist (confirmed from the
+          # exact path shown in the prior failure's own stack trace:
+          # ~/.dotnet/tools/.store/clangsharppinvokegenerator/18.1.0/clangsharppinvokegenerator/18.1.0/tools/net8.0/any/).
+          CLANGSHARP_VERSION="18.1.0"
+          TOOL_DIR="$HOME/.dotnet/tools/.store/clangsharppinvokegenerator/${CLANGSHARP_VERSION}/clangsharppinvokegenerator/${CLANGSHARP_VERSION}/tools/net8.0/any"
+          echo "Expected TOOL_DIR=$TOOL_DIR"
+          if [ ! -d "$TOOL_DIR" ]; then
+            echo "::error::Expected tool directory does not exist: $TOOL_DIR"
+            echo "::group::Actual contents of the tool .store directory (for diagnosis)"
+            find "$HOME/.dotnet/tools/.store/clangsharppinvokegenerator" 2>/dev/null
+            echo "::endgroup::"
+            exit 1
           fi
+          cp "$SO_FILE" "$TOOL_DIR/libClangSharp.so"
+          echo "Copied to $TOOL_DIR/libClangSharp.so"
 
           for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
             sudo cp "$SO_FILE" "$dir/libClangSharp.so"
