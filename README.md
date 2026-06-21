@@ -14,6 +14,21 @@ This repo automates the full pipeline: pull official native release assets →
 generate P/Invoke bindings from the official header via ClangSharp → build &
 smoke-test on linux-x64 → pack a multi-RID NuGet package.
 
+## License & attribution
+
+This repo's own code (the C# bindings, build pipeline, and tests) is MIT
+licensed — see [LICENSE](LICENSE).
+
+The native `lighter_signer` library itself is **not** part of this
+repository or the resulting NuGet package. It is downloaded at CI time
+directly from [`elliottech/lighter-go`](https://github.com/elliottech/lighter-go)'s
+official GitHub releases, which is licensed under **Apache License 2.0**.
+This project is not affiliated with or endorsed by Elliot Technologies /
+Lighter. If you redistribute the packaged native binaries as part of a
+larger work, check that your usage satisfies Apache-2.0's attribution and
+notice requirements for `lighter-go` independently of this repo's MIT
+license.
+
 ## Supported platforms
 
 | RID | Native asset source |
