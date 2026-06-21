@@ -105,6 +105,9 @@ jobs:
           extract_signatures() {
             grep -E '^\s*extern\s' "$1" \
               | sed 's/__declspec(dllexport) //g' \
+              | sed 's/long long int/long long/g' \
+              | sed 's/long long unsigned int/unsigned long long/g' \
+              | sed 's/(void)/()/g' \
               | sed 's/[[:space:]]\+/ /g' \
               | sort
           }
