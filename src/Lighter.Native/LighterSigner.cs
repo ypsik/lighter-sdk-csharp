@@ -23,6 +23,34 @@ using Lighter.Native.Generated;
 /// struct-field and parameter contexts, not a mistake here. Conversions
 /// between `long` and `nint` are implicit on 64-bit but the OrderLeg
 /// public API stays on `long` for an ordinary, framework-agnostic surface.
+/// `nint == int64_t` only holds on 64-bit targets, which is fine here since
+/// every supported RID (win-x64, linux-x64, linux-arm64, osx-arm64) is
+/// 64-bit — this would break on a hypothetical 32-bit RID, which is not a
+/// target and never has been.
+///
+/// THREE THINGS NOT YET VERIFIED, FLAGGED HERE RATHER THAN GUESSED AT:
+///
+/// 1. Every Free()'d char* is assumed to be heap-allocated by the native
+///    side specifically for the caller to free. If any native function
+///    ever returns a static/string-literal pointer instead (e.g. a
+///    hardcoded "ok" on some path), calling Free() on it would crash. This
+///    has not caused a problem in the one function actually exercised in
+///    CI (GenerateApiKey) — but that doesn't confirm it for the other 18.
+/// 2. There is no synchronization here for concurrent calls against the
+///    same (apiKeyIndex, accountIndex) client context created by
+///    CreateClient. If lighter_signer keeps internal mutable state keyed
+///    by those indices (e.g. a nonce counter), concurrent signing calls
+///    from multiple threads could race. Nothing in this wrapper enforces
+///    single-threaded use — callers building a multi-threaded order
+///    pipeline need to serialize access themselves until this is
+///    confirmed one way or the other against the native source.
+/// 3. `fixed (CreateOrderTxReq* ptr = native) { ... }` in
+///    SignCreateGroupedOrders assumes the native call only reads through
+///    the pointer synchronously and never retains it past the call
+///    returning. This is the standard signer-library assumption (the call
+///    hashes/signs and returns) and not something the cgo header
+///    contradicts, but it hasn't been independently confirmed against the
+///    Go source's actual implementation of SignCreateGroupedOrders.
 /// </summary>
 public sealed unsafe class LighterSigner
 {
@@ -359,6 +387,18 @@ public sealed unsafe class LighterSigner
         }
     }
 
+    /// <summary>
+    /// Throws if errPtr is non-null. Ownership note: this method does NOT
+    /// free errPtr itself — every current call site wraps this in a
+    /// try/finally that calls FreeIfNotNull(result.err) regardless of
+    /// whether ThrowIfError throws (try/finally guarantees the finally
+    /// block runs even when an exception propagates out of try). Adding a
+    /// Free() call here too would double-free that pointer. If you add a
+    /// new call site for this method, make sure it follows the same
+    /// try { ThrowIfError(result.err); ... } finally { FreeIfNotNull(result.err); }
+    /// pattern as GenerateApiKey/UnwrapSignedTx/CreateAuthToken below —
+    /// calling it outside that pattern will leak errPtr.
+    /// </summary>
     private static void ThrowIfError(sbyte* errPtr)
     {
         if (errPtr == null) return;
